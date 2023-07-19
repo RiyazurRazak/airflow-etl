@@ -8,12 +8,13 @@ from airflow.decorators import (
     task,
 ) 
 import requests
-from azure.cosmos.aio import CosmosClient as cosmos_client
+from pymongo import MongoClient
+import os
 
 
 default_args = {
     "owner": "riyaz",
-    "retries": 6
+    "retries": 3
 }
 
 @dag(
@@ -28,19 +29,17 @@ def rss_feed_dag():
     @task
     def extract(**context):
         res = requests.get("https://timesofindia.indiatimes.com/rssfeedstopstories.cms")
-        logging.info(res.content)
-        filename = "rss_feed_{}.xml".format(pendulum.now())
-        open(filename, "x")
-        file = open(filename, "w")
-        file.write(res.text) 
+        if not os.path.exists("raw"):
+            os.mkdir("raw")
+        filename = f"raw/raw_rss_feed_{pendulum.now()}.xml"
+        with open(filename, "w") as file:
+            file.write(res.text) 
         return filename
 
     @task  
     def transform(**context):
         ti = context["ti"]
         fileName = ti.xcom_pull(task_ids="extract",key="return_value")
-        print(fileName)
-        logging.info(fileName)
         tree = ET.parse(fileName)
         root = tree.getroot()
         items = []
@@ -49,7 +48,9 @@ def rss_feed_dag():
             description = item.find('description').text
             guid = item.find("guid").text
             items.append((title, description, guid))
-        curratedFilename = f'curated_{pendulum.now()}.csv'
+        if not os.path.exists("curated"):
+            os.mkdir("curated")
+        curratedFilename = f'curated/curated_{pendulum.now()}.csv'
         with open(curratedFilename, 'w', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(['Title', 'Description', 'GUID'])
@@ -61,13 +62,12 @@ def rss_feed_dag():
     def load(**context):
         ti = context["ti"]
         filename = ti.xcom_pull(task_ids="transform",key="return_value")
-        client = cosmos_client("url", credential="masterkey")
-        database = client.get_database_client("etl")
-        container = database.get_container_client("rssfeed")
+        mongoClient = MongoClient("<connection_string>")
+        db = mongoClient['warehouse']
+        collection = db['rss_feed']
         with open(filename, newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for item in reader:
-                container.upsert_item(item)
+            items = csv.DictReader(csvfile)
+            collection.insert_many(items)
 
     extract() >> transform() >> load()
 
